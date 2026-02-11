@@ -31,4 +31,5 @@ results/
 
 # OS
 .DS_Store
+.idea/
 Thumbs.db
