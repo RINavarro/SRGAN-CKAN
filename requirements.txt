@@ -3,3 +3,8 @@ torchvision
 numpy
 matplotlib
 tqdm
+
+mlflow>=3.16,<4
+lpips
+pytorch-msssim
+Pillow

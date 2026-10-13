@@ -33,3 +33,14 @@ results/
 .DS_Store
 .idea/
 Thumbs.db
+
+# MLflow local tracking
+mlruns/
+mlflow.db
+
+# Local backups
+*.zip
+
+# SQLite auxiliary files
+*.db-shm
+*.db-wal
