@@ -1,67 +1,62 @@
+"""Bloque residual SR con grado B-spline configurable por bloque."""
 from torch import nn
 
 
 class ResidualBlock(nn.Module):
-    """
-    Bloque residual para SR:
-    - norm: 'in' (InstanceNorm, recomendado con batch pequeño), 'bn' (BatchNorm) o 'none'
-    - post_activation: si True, aplica PReLU después de la suma residual
+    """Dos convoluciones CKAN de grado d_l con conexión residual.
+
+    La pareja de operadores comparte el grado polinomial, pero NO sus
+    coeficientes entrenables. Para G intervalos, cada operador spline tiene
+    C_out * (C_in * kH * kW) * (G + d_l) coeficientes.
     """
 
-    def __init__(self, channels, norm: str = 'in', post_activation: bool = True):
+    def __init__(self, channels, norm: str = 'in', post_activation: bool = True,
+                 spline_degree: int = 3, grid_size: int = 8,
+                 projector_type: str = 'spline', chunk_pixels: int = 8192,
+                 projector_chunk_size: int = 256):
         super().__init__()
+        if isinstance(spline_degree, bool) or not isinstance(spline_degree, int) or spline_degree < 1:
+            raise ValueError('spline_degree debe ser un entero positivo')
+        self.spline_degree = spline_degree
+        self.projector_type = projector_type
 
-        def _norm_layer(kind: str, c: int):
+        def norm_layer(kind, c):
             if kind == 'bn':
                 return nn.BatchNorm2d(c, affine=True)
-            elif kind == 'in':
-                # IN estable para batch pequeño; sin running stats
+            if kind == 'in':
                 return nn.InstanceNorm2d(c, affine=True, track_running_stats=False)
-            elif kind == 'none':
+            if kind == 'none':
                 return nn.Identity()
-            else:
-                raise ValueError(f"norm inválido: {kind}")
+            raise ValueError(f'norm inválido: {kind}')
 
-        N = lambda: _norm_layer(norm, channels)
+        def conv():
+            return nn.KAN_Conv2d(
+                channels, channels, kernel_size=3, padding=1,
+                spline_degree=spline_degree, grid_size=grid_size,
+                projector_type=projector_type, chunk_pixels=chunk_pixels,
+                projector_chunk_size=projector_chunk_size)
 
-        self.block = nn.Sequential(
-            nn.KAN_Conv2d(channels, channels, kernel_size=3, padding=1),
-            N(),
-            nn.PReLU(),
-            nn.KAN_Conv2d(channels, channels, kernel_size=3, padding=1),
-            N()
-        )
-
-        # Activación después de la suma
+        self.block = nn.Sequential(conv(), norm_layer(norm, channels), nn.PReLU(),
+                                   conv(), norm_layer(norm, channels))
         self.post_act = nn.PReLU() if post_activation else nn.Identity()
-
         self._initialize_weights()
 
     def _initialize_weights(self):
         for m in self.modules():
             if isinstance(m, nn.KAN_Conv2d):
-                # Importante: no inicializar como si fuera Conv2d estándar
-                continue
-            elif isinstance(m, nn.Conv2d):
-                # Kaiming para conv + (norm) + PReLU: fan_in es razonable
+                continue  # No reinicializar los coeficientes spline.
+            if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='leaky_relu')
                 if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
+                    nn.init.zeros_(m.bias)
             elif isinstance(m, (nn.BatchNorm2d, nn.InstanceNorm2d)):
-                # Asegura identidad al inicio
-                if getattr(m, 'weight', None) is not None:
-                    nn.init.constant_(m.weight, 1.0)
-                if getattr(m, 'bias', None) is not None:
-                    nn.init.constant_(m.bias, 0.0)
-            elif isinstance(m, nn.PReLU):
-                # Slope inicial típica
-                if getattr(m, 'weight', None) is not None:
-                    nn.init.constant_(m.weight, 0.25)
-            elif isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, 0, 0.02)
+                if m.weight is not None:
+                    nn.init.ones_(m.weight)
                 if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.PReLU):
+                nn.init.constant_(m.weight, 0.25)
+            # No tocar nn.Linear interno de KANSplineProjector.
 
     def forward(self, x):
-        out = x + self.block(x)
-        return self.post_act(out)
+        return self.post_act(x + self.block(x))
